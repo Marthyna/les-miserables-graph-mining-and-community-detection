@@ -1,0 +1,486 @@
+---
+title: "TP4 - Report"
+author: "EL FARISSI Tarik, OUMAR Isselmou, WEBER Marthyna Luiza"
+date: "2023-04-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Part 1: Import and first explorations
+
+```{r import}
+library(igraph)
+dat <- read.table("lesmis.txt", header = FALSE, sep = "\t")
+misgraph <- simplify(graph.data.frame(dat, directed=FALSE))
+```
+
+##### a) Visualizing the graph:
+
+```{r visualizeGraph}
+plot.igraph(misgraph, vertex.label.cex = 0.65, vertex.color = "lightblue", edge.color = "gray50", main= "Characters' interactions in Les Miserables")
+```
+
+By default, igraph uses the Fruchterman-Reingold layout algorithm to position the vertices. This algorithm places vertices in such a way that connected vertices are closer together than unconnected vertices, and tries to minimize the overall edge length. We can modify various aspects of the plot using different parameters of the `plot.igraph` function. To change the font size of the labels, we use the `vertex.label.cex` parameter, for the color of the vertices, we use the `vertex.color` parameter. for the color of the edges, we use the `edge.color` parameter and so on. There are also different layouts, for example the circle one or the grid one, but they did not help much to improve the visibility of the graph.
+
+##### b) Properties of the graph:
+
+Auxiliary function to check for graph completeness, checks for the existence of zeros outside the principal diagonal of the adjacency matrix, which indicates that there are nodes that are not connected to all the other nodes.
+
+```{r is_complete}
+is_complete <- function(graph) {
+  adj <- as.matrix(get.adjacency(graph))
+  n <- nrow(adj)
+  for(i in 1:n) {
+    for(j in 1:n) {
+      if(adj[i, j] == 0 && i != j)
+        return(FALSE)
+    }
+  }
+  return(TRUE)
+}
+```
+
+Calculating the graph's properties:
+
+```{r properties, results='asis'}
+# Determine type of graph
+is_directed <- is_directed(misgraph)
+cat("Graph type:", ifelse(is_directed, "Directed", "Undirected"), "\n")
+
+# Determine order and size of graph
+graph_order <- vcount(misgraph)
+graph_size <- ecount(misgraph)
+cat("Graph order:", graph_order, "\n")
+cat("Graph size:", graph_size, "\n")
+
+# Determine graph density
+graph_density <- graph.density(misgraph)
+cat("Graph density:", graph_density, "\n")
+
+# Determine graph diameter
+graph_diameter <- diameter(misgraph, directed = is_directed, weights = NA)
+cat("Graph diameter:", graph_diameter, "\n")
+
+# Determine if the graph is completecosi
+cat("Is the graph complete?", is_complete(misgraph), "\n")
+```
+
+-   The graph is undirected.
+
+-   The size of the graph is 77, which is the number of vertices, and the order of the graph is 254, which is the number of edges.
+
+-   The density of the graph is 0.0868, which is the ratio of the number of edges to the maximum possible number of edges in the graph. The diameter of the graph is 5, which is the maximum shortest path length between any two vertices in the graph. Such a diameter suggests that the graph is has a relatively high degree of connectivity, which is typical of a character interaction network.
+
+-   The graph is not complete because the density is less than 1, which means that not all pairs of vertices are connected by an edge. In fact, the density is quite low, indicating that the graph is relatively sparse and that there are many characters in the novel who do not interact with each other and are probably only linked because of interactions with other characters (which indicates we could partition this graph in clusters to identify the true relations).
+
+##### c) Purpose of the code below
+
+We are setting the seed at 3 to be sure that our results will be reproducible.
+
+Secondly, we set the size of node's labels to be proportional to each node's degree. We get the degrees of the graph in a vector, then add 10 to each degree to ensure that the minimum font size is 11, then normalize the degree measure dividing it by the maximum degree. The bigger the degree of a node, the bigger the label.
+
+And finally, the last line calculates a way to show all nodes and labels in a nicer view than default.
+
+The structure of the nodes shown by our code is inclined to put nodes with the bigger degree in the center and to put nodes with smaller degree at the edges of the structure. In addition, we avoid as much as possible to have edges cross each others.
+
+In link with the class, we are gathering nodes of a community together.
+
+"layout_with_fr" is a graph layout algorithm that simulates physics rules where nodes repulse each other and edges are like springs. This algorithm runs and moves nodes until they reach a stable state.
+
+```{r code_below}
+set.seed(3)
+V(misgraph)$label.cex <- (degree(misgraph)+10)/max(degree(misgraph))
+l <- layout_with_fr(misgraph)
+plot(misgraph, vertex.size=3, layout = l)
+```
+
+## Part 2: Community detection
+
+#### Hierarchical agglomerative clustering
+
+##### a) The concept:
+
+In hierarchical agglomerative clustering each data point initially belongs to its own cluster, and the algorithm successively merges pairs of clusters together until all data points belong to a single cluster. The merging process is determined by a function that measures the similarity or dissimilarity between clusters based on the distances between their data points. The result is a dendrogram that shows the hierarchy of clusters, where the height of each node corresponds to the distance between the clusters being merged.
+
+To define the distance between two vertices, we can use either the cosine similarity or the Jaccard coefficient, which calculates the proportion between the number of shared neighbors between nodes and the total number of neighbors they have.
+
+To define the distance between two clusters, we can use the single, complete or average linkage approach. Single linkage approach is defined as the minimal inter-cluster similarity, that is, the smallest distance between any pair of points, one from each cluster. Similarly, complete linkage approach is the maximal inter-cluster dissimilarity. Average linkage is the mean inter-cluster dissimilarity, that is, the average dissimilarity between all pairs of points, one from one cluster and one from the other. This approach is less sensitive to outliers or distant points than single linkage.
+
+##### b) Hierarchical clustering with complete linkage and Jaccard coefficient
+
+First, we define a function to calculate the Jaccard coefficient between two nodes:
+
+```{r jaccardCoefficient}
+# A and B are the sets of neighbors of each node
+jaccard_similarity <- function(A, B) {
+  intersection <- sum(A & B)
+  union <- sum(A | B)
+  return(intersection/union)
+}
+```
+
+Then, we define a function to generate the dissimilarity matrix of the graph:
+
+```{r dissim_matrix}
+dissimilarity_matrix <- function(graph) {
+  # Initializing the adjacency matrix and the similarity matrix
+  adj <- as.matrix(get.adjacency(graph))
+  n <- nrow(adj)
+  sim_matrix <- matrix(0, ncol = n, nrow = n)
+  
+  # Fill in the similarity matrix calculating the jaccard coefficient for each pair of nodes
+  for(i in 1:(n-1)) {
+    for(j in (i+1):n) {
+      sim_matrix[i, j] <- sim_matrix[j, i] <- jaccard_similarity(adj[i,], adj[j,])
+    }
+  }
+  diag(sim_matrix) <- 1
+  
+  # Calculate dissimilarities
+  dissim_matrix <- 1 - sim_matrix
+  return(dissim_matrix)
+}
+```
+
+Finally, we call the `hclust` function using our dissimilarity matrix and the complete linkage method:
+
+```{r hierClust_completeLink_Jaccard}
+# Create the dissimilarity matrix and hierarchical clustering object
+dissim_matrix <- dissimilarity_matrix(misgraph)
+mishclust <- hclust(as.dist(dissim_matrix), method = "complete")
+```
+
+##### c) Plotting partitions' modularity
+
+The following code creates an empty vector `mod`, then cuts the `mishclust` tree in several groups, starting by 1 group going until 10 groups. Then it uses the `modularity` function to calculate the degree of modularity of `misgraph` wit respect to the current division of `mishclust` and store it in the `mod` vector to plot the values at the end.
+
+The modularity of a graph with respect to a partition measures how good that partition is, that is, how well connected vertices within this partition are and how disconnected they are from vertices outside this partition.
+
+The modularity $Q$ is defined as $Q = \frac{1}{2m} \sum_{i,j}(A_{ij} - \gamma\frac{k_ik_j}{2m})\delta(c_i,c_j)$, where $m$ is the number of edges, $A_{ij}$ is the adjacency between nodes $i$ and $j$, $k_i$ is the degree of $i$ (same concept for $k_j$), $c_i$ is the community to which $i$ belongs (same concept for $c_j$). $\delta(x,y)$ is 1 if $x = y$ and 0 otherwise. $\gamma$ is a scaling parameter that adjusts the expected degree of the vertices. $Q$ is large only when the number of edges between nodes of the same community is significantly greater than the number of edges we would get it they were randomly placed.
+
+The modularity is then defined as the sum of the contributions of all pairs of vertices in the same community minus the expected number of contributions if the edges were placed at random. High modularity indicates a good community structure, where vertices inside the same community are densely connected to each other, and sparsely connected to vertices outside their community. We can say that a graph is assortative if it has high modularity, that is, a significant fraction of the edges in the graph run between nodes of the same community.
+
+Therefore, the code below plots how good each partition (from 1 cluster to 10) performs.
+
+```{r testingModularity}
+mod = c()
+for (i in 1:vcount(misgraph)) {
+  labels = cutree(mishclust , i)
+  mod[i] = modularity(x = misgraph, membership = labels) 
+}
+plot(mod, type="l", main = "Modularity per number of clusters")
+```
+
+We think that in order to have a better understanding of the performance of each partition, we should be testing with the number of cluster ranging from 1 to `vcount(misgraph)`. The most appropriate number of partitions can be found by the maximum modularity:
+
+```{r bestNumberCommunities}
+best_community_nb = which.max(mod)
+print(paste("Best number of communities: ", best_community_nb))
+print(paste("Highest modularity: ", max(mod)))
+```
+
+Therefore, 16 is the best number of cluster to partition the graph in.
+
+##### d) Visualizing the clusters in the graph
+
+```{r plotWithColors}
+labels = cutree(mishclust, best_community_nb)
+V(misgraph)$color = labels
+plot.igraph(misgraph, main = "Graph colored by clusters")
+```
+
+To characterize each community, we can analyze some properties, such as their density and proximity. The density is the ratio of edges between nodes of a graph versus the total number of edges that could exist in this graph. The proximity measures how close are the nodes in a graph, and we used average distance between nodes to calculate this in our code:
+
+```{r proximityFunction}
+proximity <- function(graph) {
+  n <- vcount(graph)
+  sum_dist <- sum(distances(graph)) - sum(diag(distances(graph)))
+  return(sum_dist / (n*(n-1)/2))
+}
+```
+
+```{r characterizeCommunities}
+densities <- c()
+proximities <- c()
+V(misgraph)$label.cex <- 0.8
+
+for (i in 1:best_community_nb) {
+  subgraph <- induced.subgraph(misgraph, which(labels == i))
+  
+  densities[i] <- graph.density(subgraph)
+  proximities[i] <- proximity(subgraph)
+
+  plot(subgraph, main = paste("Subgraph density = ", densities[i], " and proximity = ", proximities[i]))
+}
+```
+
+We notice that while some communities are totally connected and others are strongly connected, there are communities formed by completely disconnected nodes and communities composed of a single node. The reason behind this might be because HAC is based on the notion of similarity or dissimilarity between pairs of nodes in the graph, and it can produce clusters that consist of a single node if there are no other nodes that are similar enough to be grouped together.
+
+The communities formed are:
+
+-   **Community 1**: The characters Gillenormand, Mademoiselle Gillenormand, Lieutenant Theodule Gillenormand, and Baroness De Thenard are all related to each other as members of the same family, with Gillenormand being the patriarch of the family, Mademoiselle Gillenormand his daughter, Lieutenant Theodule Gillenormand his grandson, and Baroness De Thenard his granddaughter. Cosette, on the other hand, is not related to the Gillenormand family but she does have a significant connection to them by being Gillenormand's grandson's love interest.
+
+-   **Community 2**: The characters Zephine, Dahlia, Fameuil, Favourite, and Listolier are all friends of Fantine's lover, Felix Tholomyes and, with Blacheville, belong all to the same social circle. Despite being a central character (we can see that her node is more prominent in the main graph), Fantine is connected to them through her past relationship with Tholomyes and their shared social circle.
+
+-   **Community 3**: The characters Joly, Combeferre, Bahorel, Courfeyrac, Grantaire, Bossuet (also known as L'Aigle de Meaux), Enjolras, Marius, Feuilly, Gavroche and Jean Prouvaire are all members of the Friends of the ABC, a group of idealistic young men who are dedicated to the cause of revolution and social change. Madame Hucheloup is the owner of the café that becomes a meeting place for the Friends of the ABC. Mabeuf is connected to the Friends of the ABC through his friendship with Enjolras.
+
+-   **Community 4**: The characters Brevet, Cochepaille, Chenildieu, and Champmathieu are all former convicts who feature in the opening chapters. The Judge is a minor character who presides over the trial of Champmathieu. Bamatabois is not really related to their stories.
+
+-   **Communities 5, 6, 8 to 16:** Some of these characters are connected through their shared social status and the themes of wealth and poverty that are central to the novel, they do not have direct relationships with each other.
+
+-   **Community 7**: These characters are connected through their involvement in criminal activities, with some characters, such as Javert and Jean Valjean, representing law and order, while others, such as Thenardier and his associates, represent the criminal underworld.
+
+    By analyzing the story and the characteristics of each graph, we can conclude that the graphs with the closest related characters in the story are also the graphs with higher values of density and proximity.
+
+##### e) Plotting the dendrogram
+
+Here we are plotting the resulting dendrogram from the hierarchical clustering process, specifying the character names as labels, and resizing and re-positioning the labels with `cex` and `hang.`
+
+```{r plotDendrogram}
+# Open plot in new window to better visualize the labels
+plot(mishclust, labels = V(misgraph)$name, cex = 0.6, hang = -1, main = "Dendrogram of the hierarchical clustering")
+```
+
+##### f) Average and single linkage
+
+We can repeat the procedures above using single linkage and average linkage to discover which approach performs best:
+
+```{r averageAndSingleLinkage}
+mishclust_average <- hclust(as.dist(dissim_matrix), method = "average")
+mishclust_single <- hclust(as.dist(dissim_matrix), method = "single")
+
+mod_average = c()
+mod_single = c()
+
+for (i in 1:vcount(misgraph)) {
+  labels_average = cutree(mishclust_average , i)
+  labels_single = cutree(mishclust_single , i)
+  
+  mod_average[i] = modularity(x = misgraph, membership = labels_average) 
+  mod_single[i] = modularity(x = misgraph, membership = labels_single) 
+}
+
+plot(mod_average, type="l", main = "Average linkage - modularity per number of clusters")
+plot(mod_single, type="l", main = "Single linkage - modularity per number of clusters")
+
+best_community_nb_average = which.max(mod_average)
+best_community_nb_single = which.max(mod_single)
+
+labels_average = cutree(mishclust, best_community_nb_average)
+labels_single = cutree(mishclust, best_community_nb_single)
+
+V(misgraph)$label.cex <- 0.5
+
+V(misgraph)$color = labels_average
+plot.igraph(misgraph)
+title(main = paste("hclust with average linkage, ", best_community_nb_average, " communities and modularity = ", mod_average[best_community_nb_average]), cex.main = 0.85)
+
+V(misgraph)$color = labels_single
+plot.igraph(misgraph)
+title(main = paste("hclust with single linkage, ", best_community_nb_single, " communities and modularity = ", mod_single[best_community_nb_single]), cex.main = 0.85)
+```
+
+We conclude that hierarchical agglomerative clustering performed as follows:
+
+-   Average linkage: 12 communities with modularity of 0.43682,
+
+-   Single linkage: 20 communities with modularity of 0.41942,
+
+-   Complete linkage: 16 communities with modularity of 0.42560
+
+This indicates that average linkage had the best result in identifying groups of similar characters and performing a well separated and distinct, because it attended a higher modularity score using less communities.
+
+Single linkage on the other hand performed worse, resulting in the largest number of communities and the lowest modularity score, indicating a more fragmented and less organized clustering.
+
+Average linkage tends to produce more balanced clusters compared to single linkage, which tends to create long chains of connected points. This is because average linkage takes into account the average distance between all pairs of points in different clusters when deciding which clusters to merge, whereas single linkage only looks at the minimum distance between any two points in different clusters.
+
+#### Edge betweeness
+
+##### a) The concept
+
+It is a divisive procedure to cluster the vertices of a graph. Instead of removing edges between vertex pairs that are not really similar, we find and favorize edges that are between communities rather than those inside communities, that is, we prioritize the progressive remotion of edges from the original graph rather than the addition of the strongest edges to an empty vertex set.
+
+The edge betweeness of an edge is the quantity of shortest paths between vertices in which this edge is included. If a graph has clusters that are only connected by a few edges, then necessarily all shortest paths between clusters have to go through these edges, which means they have high edge betweeness. We can separate these clusters and reveal the communities of a graph by removing these edges.
+
+The algorithm involves calculating the betweeness scores of the edges in the graph, then finding the edge with the highest betweeness and removing it from the graph. If after this, the graph is split, we compute the edge betweeness of the sub-graphs, else we update the edge betweeness of the whole graph, then repeat the procedure.
+
+We can find the betweeness score of an edge $e$ using the betweeness centrality, that is, the sum of the ratio between the number of shortest paths between every pair of vertices $(s, t)$ that go through $e$ and the total number of shortest paths between $(s, t)$.
+
+##### b) Plotting the edge betweenness dendrogram
+
+```{r plotEdgeBetweenness}
+library("ggplot2")
+library("ggdendro")
+mis_edgeb <- cluster_edge_betweenness(misgraph)
+ggdendrogram(as.dendrogram(mis_edgeb)) + labs(title = "Dendrogram of edge betweenness clustering")
+plot(mis_edgeb, misgraph, main = "Graph colored by clusters")
+```
+
+##### c) Calculate modularity
+
+The code below selects the first `i` removed edges from the edge betweenness community object and removes them from the graph, creating a new graph `mis_graph2`. It then retrieves the membership information of each cluster defined in `mis_graph2` and calculates the modularity of the graph partitioned by this clustering information. It repeats this procedure as many times as there are edges in the original graph. In the end, it creates a new graph from the original graph by removing the edges corresponding to the edge betweenness partition that performed the best in terms of modularity.
+
+```{r}
+f <- function(i) {
+  mis_graph2 = delete.edges(misgraph, mis_edgeb$removed.edges[seq(length = i)])
+  cl = clusters(mis_graph2)$membership
+  modularity(misgraph, cl)
+}
+mods = sapply(0:ecount(misgraph), f)
+mis_graph2 <- delete.edges(misgraph, mis_edgeb$removed.edges[seq(length = which.max(mods)-1)])
+```
+
+We can plot the graph once again to see the results:
+
+```{r plotMisGraph2}
+V(mis_graph2)$color = clusters(mis_graph2)$membership
+plot(mis_graph2, vertex.label.family = "Helvetica", main = "Clusters found with edge betweenness")
+```
+
+We can see in the new graph that there are less isolated vertices than in the HAC results. This happens because edge betweenness takes into account the entire structure of the graph rather than only looking to the local similarity of the nodes (which can leave out nodes that are not really similar to any other nodes in the graph). Since edge betweenness identifies the "bridges" between communities and removes them to reveal these separated communities, we see larger and more interconnected clusters that include nodes that were previously isolated.
+
+Let's use the same approach as before to describe the communities we found, analyzing their proximity and density:
+
+```{r characterizeEdgeBetweennessCommunities}
+cl <- clusters(mis_graph2)$membership
+V(mis_graph2)$label.cex <- 0.8
+
+# calculate density and proximity of each community
+community_data <- lapply(unique(cl), function(c) {
+  subgraph <- induced.subgraph(mis_graph2, which(cl == c))
+  
+  density <- graph.density(subgraph)
+  proximity <- proximity(subgraph)
+  
+  list(subgraph = subgraph, density = density, proximity = proximity)
+})
+
+# Plot each community with its density and proximity value in the title
+for (i in seq_along(community_data)) {
+  plot(community_data[[i]]$subgraph)
+  title(main = sprintf("Community %d: Density = %.4f, Proximity = %.4f", i, community_data[[i]]$density, community_data[[i]]$proximity), cex.main = 0.8)
+}
+```
+
+We can notice a greater number of more connected clusters, and less single-node or disconnected clusters. The communities formed are:
+
+-   **Community 1**: the cluster formed by the Gillenormand family and Cosette in the center (Cosette still linked to them presumably by her relationship with Marius). Madame Thénardier should be linked to Cosette because of their past, rather than be linked to Gillenormand. Gillenormand has a connection to Magnon through her former employment in his household. Toussaint is a servant who works for Jean Valjean and helps to care for Cosette during her childhood. Mademoiselle Vaubois is Mademoiselle Gillenormand' friend and companion. Mademoiselle Gillenormand and Madame Pontmercy have a strained relationship between each other. This cluster more or less represents a central relationship (the Gillenormand family) and their peripheral interactions with other characters.
+
+-   **Community 2**: the central part of the cluster is formed by the friend circle of Felix Tholomyes, Fantine's wealthy and irresponsible love interest, who leaves her pregnant with Cosette. Marguerite is the supervisor at the factory where Fantine works. Sister Perpetue becomes involved in the story when Fantine becomes seriously ill and is brought to the hospital where she works. This cluster represents a part of Fantine's story, focusing on her relationship with Felix and with minor characters that otherwise would not figure in any other cluster.
+
+-   **Community 3:** this cluster represents the members of the revolutionary student group Friends of the ABC and affiliates.
+
+-   **Community 4:** the more connected part of the cluster represents characters that interacted with the protagonist Jean Valjean. Brevet, Cochepaille, and Chenildieu are former prisoners who encounter Jean Valjean while he is on the run after breaking free. The Judge is a magistrate who presides over Jean Valjean's trial. Maubert Isabeau is a local criminal who is mistakenly identified as Jean Valjean after his escape from prison. Champmathieu is a man who is mistaken for Jean Valjean and put on trial in his place. Bamatabois is a man who harasses Fantine and is later on confronted by Jean Valjean for this. The others are characters who interact with Jean Valjean throughout the story and would have been otherwise isolated from the graph if not for the connection with him.
+
+-   **Community 5:** is centered in Bishop Charles-Francois-Bienvenu Myriel and his interactions with some of the other characters present in the cluster. Baptistine Myriel is Bishop Myriel's sister, Madame Magloire is his housekeeper. The rest of the characters are either passing figures or only mentioned in the story, and are not really connected to the Bishop.
+
+-   **Community 6:** represents the criminal underworld of Paris and its members. Pontmercy and Thenardier are connected through their involvement in the Battle of Waterloo.
+
+-   **Community 7:** a pair of possible siblings.
+
+-   **Community 8:** represents characters that appear in the context of the convent.
+
+-   **Community 9:** Mother Plutarch is aservant of M. Mabeuf, an old churchwarden who interacts more with to Marius. She is probably isolated due to lack of interactions in the novel.
+
+-   **Community 10:** Madame Burgon is the landlady of the house where Jean Valjean and Cosette temporarily reside. Jondrette, on the other hand, is the alias used by Thénardier, which might explain why these two were paired, because of their connection through Cosette.
+
+-   **Community 11:** Boulatruelle is an old roadworker, ex-convict, and minor associate of the crime chiefs. Also isolated due to probable lack of other interactions.\
+    \
+    We can notice that although we have clusters that are not really entirely related, they have at least a central structure that indicates who is the main character and who are the groups or isolated interactions associated with each protagonist.
+
+#### Spectral clustering and the Louvain algorithm
+
+The code above executes the clustering process using the Louvain algorithm and the spectral clustering approach. We print the results to check the properties of each community object generated.
+
+```{r spectralAndLouvain}
+mislouvclust <- cluster_louvain(misgraph)
+misleadeigen <- cluster_leading_eigen(misgraph)
+
+nb_comm_louvain <- length(mislouvclust)
+nb_comm_lead_eigen <- length(misleadeigen)
+
+mod_louvain = modularity(mislouvclust)
+mod_lead_eigen = modularity(misleadeigen)
+ 
+print(mislouvclust)
+print(misleadeigen)
+```
+
+We can see that the Louvain algorithm oscillates between 5 and 7 groups, with a modularity oscillating between 0.55 and 0.56. The spectral clustering, on the other hand, always produces 8 groups, and has modularity of 0.53.
+
+```{r plotLouvainAndSpectral, include=TRUE}
+labels_louvain = cutree(mishclust, nb_comm_louvain)
+labels_lead_eigen = cutree(mishclust, nb_comm_lead_eigen)
+
+V(misgraph)$label.cex <- 0.8
+
+V(misgraph)$color = labels_louvain
+plot.igraph(misgraph)
+title(main = paste("Louvain algorithm, ", nb_comm_louvain, " communities and modularity = ", mod_louvain), cex.main = 0.85)
+
+V(misgraph)$color = labels_lead_eigen
+plot.igraph(misgraph)
+title(main = paste("Spectral clustering, ", nb_comm_lead_eigen, " communities and modularity = ", mod_lead_eigen), cex.main = 0.85)
+```
+
+We can plot the communities found by the Louvain algorithm and observe their density and proximity scores:
+
+```{r plotLouvainCommunities, include=TRUE}
+densities <- c()
+proximities <- c()
+V(misgraph)$color = labels_louvain
+
+for (i in 1:nb_comm_louvain) {
+  subgraph <- induced.subgraph(misgraph, which(labels_louvain == i))
+  
+  densities[i] <- graph.density(subgraph)
+  proximities[i] <- proximity(subgraph)
+
+  plot(subgraph)
+  title(main = paste("Louvain algorithm: Subgraph density = ", densities[i], " and proximity = ", proximities[i]), cex.main = 0.85)
+}
+```
+
+We can also plot the communities found by the spectral clustering and observe their density and proximity scores:
+
+```{r plotSpectralCommunities, include=TRUE}
+densities <- c()
+proximities <- c()
+V(misgraph)$color = labels_lead_eigen
+
+for (i in 1:nb_comm_lead_eigen) {
+  subgraph <- induced.subgraph(misgraph, which(labels_lead_eigen == i))
+  
+  densities[i] <- graph.density(subgraph)
+  proximities[i] <- proximity(subgraph)
+  
+  plot(subgraph)
+  title(main = paste("Spectral clustering: Subgraph density = ", densities[i], " and proximity = ", proximities[i]), cex.main = 0.85)
+}
+```
+
+## Conclusion
+
+We can check the modularities of the clustering methods we tested so far:
+
+```{r}
+modularities <- c()
+modularities["HAC-Complete"] <- mod[best_community_nb]
+modularities["HAC-Single"] <- mod_single[best_community_nb_single]
+modularities["HAC-Average"] <- mod_average[best_community_nb_average]
+modularities["Edge Betweenness"] <- max(mods)
+modularities["Louvain"] <- mod_louvain
+modularities["Spectral clustering"] <- mod_lead_eigen
+
+output <- paste(sprintf("%s: %.4f", names(modularities), modularities), collapse="\n")
+cat(output, "\n")
+```
+
+The HAC (Hierarchical Agglomerative Clustering) did not perform well in identifying the correct communities of character interactions, as explained in section "d". This method has a tendency to only identify the central nodes of clusters and ignores the peripheral nodes. This behavior can be observed in the community graphs plotted in section "d", where the central nodes in the communities have high similarity and are linked early in the clustering process, while peripheral nodes with no strong similarity to others are often ignored.
+
+Edge betweenness, on the other hand, performed better at identifying the communities, due to the fact that it relies more on the concept of separating clusters connected by few edges rather than joining nodes based on similarity. It was easier to notice nodes that interact with lots of different characters, which was not possible in the HAC graphs due to isolated nodes.
+
+The Louvain and Spectral Clustering methods have the highest modularity values, indicating that they are the most effective at identifying meaningful communities. However, by checking the plotted communities, we can see that in reality what we have is a graph that is almost the same as the original, and a few isolated nodes, which makes it seem as the characters in the first cluster are all related (but are in reality the ones that figure more in the novel), whereas the isolated nodes were the ones. For the Louvain algorithm, since it provides a decomposition of the network into communities for different levels of organizaton as we saw in class, the intermediate solutions may also be meaningful for the study of the relations between the characters, even it these solutions don't give us the best results in terms of modularity.
